@@ -2,13 +2,15 @@
 #include <WiFi.h>
 #include <LittleFS.h>
 #include <AsyncFsWebServer.h>
-//#include <Adafruit_NeoPixel.h> //crash?
+#include <ArduinoJson.h>
+#include <ESPAsyncWebServer/src/AsyncJson.h>
+#include <base64.h>
 
-#define LED_PIN 65   
-#define LED_COUNT 1  
-//Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
+#define LED_PIN 65
+#define LED_COUNT 1
 
-typedef struct {
+typedef struct
+{
   unsigned int creditCount;
   unsigned int inputPin;
 } TransactionData;
@@ -28,6 +30,7 @@ const int outputPinOfCarWashReceiverCH2 = 12;
 const int outputPinOfCashRegister = 13;
 
 bool isTaxingEnabled = false;
+String salt = "sól";
 
 const unsigned long inputSignalWidth = 15;
 const unsigned long outputSignalWidth = 150;
@@ -39,20 +42,19 @@ AsyncFsWebServer server(80, LittleFS, "myServer");
 int testInt = 150;
 float testFloat = 123.456;
 
+// Functions declarations
 
-//Functions declarations
-
-void listenToInputTask(void* pvParameters);
-void sendOutputDataTask(void* pvParameters);
+void listenToInputTask(void *pvParameters);
+void sendOutputDataTask(void *pvParameters);
 bool startFilesystem();
-void getFsInfo(fsInfo_t* fsInfo);
-void handleTaxingRequest(AsyncWebServerRequest* request);
+void getFsInfo(fsInfo_t *fsInfo);
+void handleTaxingRequest(AsyncWebServerRequest *request);
+bool isChecksumValid(String time, String checksum);
+bool assignNewTaxing(short newTaxing);
+void handleTaxingJsonRequest(AsyncWebServerRequest *request, JsonVariant &requestJson);
 
-
-void setup() {
-  //strip.begin();
-  //strip.setPixelColor(0, strip.Color(255,165,0)); //set to orange
-  //strip.show();
+void setup()
+{
   Serial.begin(115200);
   delay(10);
   pinMode(inputPinOfComesteroMoney, INPUT_PULLUP);
@@ -67,10 +69,12 @@ void setup() {
   delay(1000);
 
   /* Start FileSystem */
-  if (startFilesystem()) {
+  if (startFilesystem())
+  {
     Serial.println("LittleFS filesystem ready!");
     File config = server.getConfigFile("r");
-    if (config) {
+    if (config)
+    {
       DynamicJsonDocument doc(config.size() * 1.33);
       deserializeJson(doc, config);
       testInt = doc["Test int variable"];
@@ -78,22 +82,23 @@ void setup() {
     }
     Serial.printf("Stored \"testInt\" value: %d\n", testInt);
     Serial.printf("Stored \"testFloat\" value: %3.2f\n", testFloat);
-  } else {
+  }
+  else
+  {
     Serial.println("LittleFS error!");
   }
 
-  //Start WiFi
-  Serial.println("lol1");
+  // Start WiFi
   IPAddress myIP = server.startWiFi(15000, "ESP32_AP1234", "123456789");
   WiFi.setSleep(WIFI_PS_NONE);
-  Serial.println("lol2");
-  if(WiFi.status() != WL_CONNECTED) {
+  if (WiFi.status() != WL_CONNECTED)
+  {
     Serial.println("WiFi not connected!");
     delay(1000);
-    //ESP.restart(); //WORKAROUND! DO NOT USE IT UNLESS YOU HAVE TO!
+    // ESP.restart(); //WORKAROUND! DO NOT USE IT UNLESS YOU HAVE TO!
   }
 
-  //Config server
+  // Config server
   server.addOptionBox("Custom options");
   server.addOption("Test int variable", testInt);
   server.addOption("Test float variable", testFloat);
@@ -101,53 +106,52 @@ void setup() {
   // Enable ACE FS file web editor and add FS info callback fucntion
   server.enableFsCodeEditor();
   server.setFsInfoCallback(getFsInfo);
-  //Listening to routes
+  // Listening to routes
   server.on("/taxing", HTTP_GET, handleTaxingRequest);
+  AsyncCallbackJsonWebHandler *handler = new AsyncCallbackJsonWebHandler("/taxing", handleTaxingJsonRequest);
+  server.addHandler(handler);
 
   // Start server
   server.init();
   Serial.print(F("Async ESP Web Server started on IP Address: "));
   Serial.println(myIP);
   Serial.println(F(
-    "Open /setup page to configure optional parameters.\n"
-    "Open /edit page to view, edit or upload example or your custom webserver source files."));
+      "Open /setup page to configure optional parameters.\n"
+      "Open /edit page to view, edit or upload example or your custom webserver source files."));
 
-
-  //Starting IO tasks
-  //Receiving data from comestero money channel
-  xTaskCreate(listenToInputTask, "Task1", 10000, (void*)&inputPinOfComesteroMoney, 1, &Task1);
+  // Starting IO tasks
+  // Receiving data from comestero money channel
+  xTaskCreate(listenToInputTask, "Task1", 10000, (void *)&inputPinOfComesteroMoney, 1, &Task1);
   delay(500);
-  //Receiving data from comestero token channel
-  xTaskCreate(listenToInputTask, "Task2", 10000, (void*)&inputPinOfComesteroToken, 1, &Task2);
+  // Receiving data from comestero token channel
+  xTaskCreate(listenToInputTask, "Task2", 10000, (void *)&inputPinOfComesteroToken, 1, &Task2);
   delay(500);
-  //Receiving data from nayax credit card channel
-  xTaskCreate(listenToInputTask, "Task3", 10000, (void*)&inputPinOfNayaxCreditCard, 1, &Task3);
+  // Receiving data from nayax credit card channel
+  xTaskCreate(listenToInputTask, "Task3", 10000, (void *)&inputPinOfNayaxCreditCard, 1, &Task3);
   delay(500);
-  //Receiving data from nayax prepaid card channel
-  xTaskCreate(listenToInputTask, "Task4", 10000, (void*)&inputPinOfNayaxPrepaidCard, 1, &Task4);
+  // Receiving data from nayax prepaid card channel
+  xTaskCreate(listenToInputTask, "Task4", 10000, (void *)&inputPinOfNayaxPrepaidCard, 1, &Task4);
   delay(500);
-  //Sending data to outputs
+  // Sending data to outputs
   xTaskCreate(sendOutputDataTask, "Task5", 10000, NULL, 1, &Task5);
   delay(500);
-  
-  //strip.setPixelColor(0, strip.Color(255,165,0)); //set to orange
-  //strip.show();
 }
 
-void loop() {
+void loop()
+{
   vTaskDelete(NULL);
 }
 
-
 /*
-* Task to listen to incoming signals from given input pin, merging them into transaction and sending to queue's back
-* pvParameters is a pointer to the input pin number of given device (int)
-*/
-void listenToInputTask(void* pvParameters) {
+ * Task to listen to incoming signals from given input pin, merging them into transaction and sending to queue's back
+ * pvParameters is a pointer to the input pin number of given device (int)
+ */
+void listenToInputTask(void *pvParameters)
+{
   Serial.print("Task input running on core ");
   Serial.println(xPortGetCoreID());
 
-  int* pinToReadPtr = (int*)pvParameters;
+  int *pinToReadPtr = (int *)pvParameters;
   int inputPin = *pinToReadPtr;
 
   bool blockInputFlag = true;
@@ -158,29 +162,40 @@ void listenToInputTask(void* pvParameters) {
   TransactionData incomingTransaction;
   incomingTransaction.inputPin = inputPin;
 
-  for (;;) {
+  for (;;)
+  {
     int inputState = digitalRead(inputPin);
     currentTime = millis();
 
-    if (inputState == LOW) {
-      if (!blockInputFlag && currentTime - lastActivationTime >= inputSignalWidth) {
+    if (inputState == LOW)
+    {
+      if (!blockInputFlag && currentTime - lastActivationTime >= inputSignalWidth)
+      {
         lastActivationTime = currentTime;
         blockInputFlag = true;
         creditCount++;
-      } else {
+      }
+      else
+      {
         delay(10);
       }
-    } else {
+    }
+    else
+    {
       blockInputFlag = false;
     }
 
     if (currentTime - lastActivationTime >= endOfInputSequenceWidth)
-      if (creditCount > 0) {
+      if (creditCount > 0)
+      {
         incomingTransaction.creditCount = creditCount;
-        if (xQueueSendToBack(TransactionsQueue, &incomingTransaction, (TickType_t)10) == pdPASS) {
+        if (xQueueSendToBack(TransactionsQueue, &incomingTransaction, (TickType_t)10) == pdPASS)
+        {
           Serial.print("Dodano do kolejki: ");
           Serial.println(String(creditCount) + " z pinu " + String(inputPin));
-        } else {
+        }
+        else
+        {
           Serial.println("Błąd przy dodawaniu do kolejki!");
         }
         creditCount = 0;
@@ -189,24 +204,30 @@ void listenToInputTask(void* pvParameters) {
 }
 
 /*
-* Task to retrieve transactions from queue and send them to outputs based on their origin and taxing status
-* pvParameters is not used
-*/
-void sendOutputDataTask(void* pvParameters) {
+ * Task to retrieve transactions from queue and send them to outputs based on their origin and taxing status
+ * pvParameters is not used
+ */
+void sendOutputDataTask(void *pvParameters)
+{
+  // TODO: refactor according to latest stakeholder requirements
   Serial.print("Task output running on core ");
   Serial.println(xPortGetCoreID());
   TransactionData transaction;
   delay(1000);
 
-  for (;;) {
-    if (xQueueReceive(TransactionsQueue, &transaction, (TickType_t)10) == pdPASS) {
+  for (;;)
+  {
+    if (xQueueReceive(TransactionsQueue, &transaction, (TickType_t)10) == pdPASS)
+    {
       Serial.print("Zdjęto z kolejki: ");
       Serial.print(transaction.creditCount);
       Serial.print(" z pinu: ");
       Serial.print(transaction.inputPin);
 
-      if (isTaxingEnabled && (transaction.inputPin == inputPinOfComesteroMoney || transaction.inputPin == inputPinOfNayaxCreditCard)) {
-        for (int i = 0; i < transaction.creditCount; i++) {
+      if (isTaxingEnabled && (transaction.inputPin == inputPinOfComesteroMoney || transaction.inputPin == inputPinOfNayaxCreditCard))
+      {
+        for (int i = 0; i < transaction.creditCount; i++)
+        {
           digitalWrite(outputPinOfCarWashReceiverCH1, HIGH);
           digitalWrite(outputPinOfCashRegister, HIGH);
           delay(outputSignalWidth);
@@ -215,8 +236,11 @@ void sendOutputDataTask(void* pvParameters) {
           delay(outputSignalWidth);
         }
         Serial.println(" i zafiskalizowano");
-      } else {
-        for (int i = 0; i < transaction.creditCount; i++) {
+      }
+      else
+      {
+        for (int i = 0; i < transaction.creditCount; i++)
+        {
           digitalWrite(outputPinOfCarWashReceiverCH2, HIGH);
           delay(outputSignalWidth);
           digitalWrite(outputPinOfCarWashReceiverCH2, LOW);
@@ -224,22 +248,29 @@ void sendOutputDataTask(void* pvParameters) {
         }
         Serial.println(" i niezafiskalizowano");
       }
-    } else {
+    }
+    else
+    {
       delay(1000);
     }
   }
 }
 
-bool startFilesystem() {
-  if (LittleFS.begin()) {
+bool startFilesystem()
+{
+  if (LittleFS.begin())
+  {
     File root = LittleFS.open("/", "r");
     File file = root.openNextFile();
-    while (file) {
+    while (file)
+    {
       Serial.printf("FS File: %s, size: %d\n", file.name(), file.size());
       file = root.openNextFile();
     }
     return true;
-  } else {
+  }
+  else
+  {
     Serial.println("ERROR on mounting filesystem. It will be formmatted!");
     LittleFS.format();
     ESP.restart();
@@ -247,27 +278,81 @@ bool startFilesystem() {
   return false;
 }
 
-void getFsInfo(fsInfo_t* fsInfo) {
+void getFsInfo(fsInfo_t *fsInfo)
+{
   fsInfo->totalBytes = LittleFS.totalBytes();
   fsInfo->usedBytes = LittleFS.usedBytes();
   strcpy(fsInfo->fsName, "LittleFS");
 }
 
-void handleTaxingRequest(AsyncWebServerRequest* request) {
+void handleTaxingRequest(AsyncWebServerRequest *request)
+{
+  // TODO: this function transform to only reading taxing status with json response
   static int value = 0;
   String reply = "Taxing is ";
   // http://xxx.xxx.xxx.xxx/taxing?val=1
-  if (request->hasParam("val")) {
+  if (request->hasParam("val"))
+  {
     value = request->arg("val").toInt();
-    if (value) {
+    if (value)
+    {
       isTaxingEnabled = true;
       reply += "set to ON";
-    } else {
+    }
+    else
+    {
       isTaxingEnabled = false;
       reply += "set to OFF";
     }
-  } else {
+  }
+  else
+  {
     reply += isTaxingEnabled ? "ON" : "OFF";
   }
   request->send(200, "text/plain", reply);
+}
+
+void handleTaxingJsonRequest(AsyncWebServerRequest *request, JsonVariant &requestJson)
+{
+  JsonObject requestJsonObj = requestJson.as<JsonObject>();
+  short newTaxing = requestJsonObj["taxing"] | -1;
+  String time = requestJsonObj["time"] | " ";
+  String checksum = requestJsonObj["checksum"] | " ";
+  short responseCode = 500;
+  JsonDocument responseDoc;
+  JsonObject responseJsonObj = responseDoc.to<JsonObject>();
+  String responseBody = "";
+  if (isChecksumValid(time, checksum))
+    if (assignNewTaxing(newTaxing))
+    {
+      responseCode = 200;
+      responseJsonObj["taxing"] = isTaxingEnabled;
+    }
+    else
+      responseCode = 400;
+  else
+    responseCode = 401;
+  serializeJson(responseDoc, responseBody);
+  request->send(responseCode, "application/json", responseBody);
+}
+
+bool isChecksumValid(String time, String checksum) // base64
+{
+  time = time + salt;
+  String calculatedChecksum = base64::encode(time);
+  if (calculatedChecksum == checksum)
+    return true;
+  else
+    return false;
+}
+
+bool assignNewTaxing(short newTaxing)
+{
+  if (newTaxing == 1)
+    isTaxingEnabled = true;
+  else if (newTaxing == 0)
+    isTaxingEnabled = false;
+  else
+    return false;
+  return true;
 }
