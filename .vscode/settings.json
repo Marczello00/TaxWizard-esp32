@@ -1,3 +1,4 @@
 {
-    "cmake.configureOnOpen": true
+    "cmake.configureOnOpen": true,
+    "cmake.sourceDirectory": "C:/Users/marce/Desktop/esp/TaxWizard-esp32-s2/.pio/libdeps/esp32-s2-saola-1/ArduinoJson/src"
 }
