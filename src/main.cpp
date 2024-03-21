@@ -11,9 +11,16 @@
 
 typedef struct
 {
-  unsigned int creditCount;
-  unsigned int inputPin;
+  unsigned short creditCount;
+  unsigned short inputPin;
 } TransactionData;
+
+typedef struct
+{
+  unsigned short creditCount;
+  unsigned short outputPin;
+  bool shouldBeTaxed;
+} OutputTransactionData;
 
 TaskHandle_t Task1;
 TaskHandle_t Task2;
@@ -21,15 +28,15 @@ TaskHandle_t Task3;
 TaskHandle_t Task4;
 TaskHandle_t Task5;
 
-const int inputPinOfComesteroMoney = 4;
-const int inputPinOfComesteroToken = 5;
-const int inputPinOfNayaxCreditCard = 6;
-const int inputPinOfNayaxPrepaidCard = 7;
-const int outputPinOfCarWashReceiverCH1 = 11;
-const int outputPinOfCarWashReceiverCH2 = 12;
-const int outputPinOfCashRegister = 13;
-const int outputPinOfNayaxSupply = 17;
-const int outputPinOfComesteroSupply = 18;
+const unsigned short inputPinOfComesteroMoney = 4;
+const unsigned short inputPinOfComesteroToken = 5;
+const unsigned short inputPinOfNayaxCreditCard = 6;
+const unsigned short inputPinOfNayaxPrepaidCard = 7;
+const unsigned short outputPinOfCarWashReceiverCH1 = 11;
+const unsigned short outputPinOfCarWashReceiverCH2 = 12;
+const unsigned short outputPinOfCashRegister = 13;
+const unsigned short outputPinOfNayaxSupply = 17;
+const unsigned short outputPinOfComesteroSupply = 18;
 
 bool isTaxingEnabled = false;
 String salt = "sól";
@@ -45,7 +52,7 @@ AsyncFsWebServer server(80, LittleFS, "myServer");
 int testInt = 150;
 float testFloat = 123.456;
 
-//Functions declarations
+// Functions declarations
 
 void listenToInputTask(void *pvParameters);
 void sendOutputDataTask(void *pvParameters);
@@ -57,6 +64,11 @@ bool isChecksumValid(String time, String checksum);
 bool assignNewTaxing(unsigned short newTaxing);
 void initPins();
 bool startMoneyProcessingSystem();
+void sendTransactionToPin(OutputTransactionData outcomingTransaction);
+bool shouldThisPinBeTaxed(unsigned short pin);
+unsigned short getOutputPin(unsigned short inputPin);
+void logTransaction(OutputTransactionData transaction);
+void logTransaction(TransactionData transaction);
 
 void setup()
 {
@@ -110,7 +122,6 @@ void setup()
   // Start server
   server.init();
 
-
   Serial.print(F("Async ESP Web Server started on IP Address: "));
   Serial.println(myIP);
   Serial.println(F(
@@ -131,11 +142,11 @@ void loop()
  */
 void listenToInputTask(void *pvParameters)
 {
-  Serial.print("Task input running on core ");
-  Serial.println(xPortGetCoreID());
+  unsigned short *pinToReadPtr = (unsigned short *)pvParameters;
+  unsigned short inputPin = *pinToReadPtr;
 
-  int *pinToReadPtr = (int *)pvParameters;
-  int inputPin = *pinToReadPtr;
+  Serial.print("Nasluchwianie na pinie: ");
+  Serial.println(inputPin);
 
   bool blockInputFlag = true;
   unsigned int creditCount = 0;
@@ -173,14 +184,9 @@ void listenToInputTask(void *pvParameters)
       {
         incomingTransaction.creditCount = creditCount;
         if (xQueueSendToBack(TransactionsQueue, &incomingTransaction, (TickType_t)10) == pdPASS)
-        {
-          Serial.print("Dodano do kolejki: ");
-          Serial.println(String(creditCount) + " z pinu " + String(inputPin));
-        }
+          logTransaction(incomingTransaction);
         else
-        {
           Serial.println("Błąd przy dodawaniu do kolejki!");
-        }
         creditCount = 0;
       }
   }
@@ -192,45 +198,19 @@ void listenToInputTask(void *pvParameters)
  */
 void sendOutputDataTask(void *pvParameters)
 {
-  // TODO: refactor according to latest stakeholder requirements
-  Serial.print("Task output running on core ");
-  Serial.println(xPortGetCoreID());
+  Serial.print("Zadanie wysylania rozpoczete");
   TransactionData transaction;
-  delay(1000);
 
   for (;;)
   {
     if (xQueueReceive(TransactionsQueue, &transaction, (TickType_t)10) == pdPASS)
     {
-      Serial.print("Zdjęto z kolejki: ");
-      Serial.print(transaction.creditCount);
-      Serial.print(" z pinu: ");
-      Serial.print(transaction.inputPin);
-
-      if (isTaxingEnabled && (transaction.inputPin == inputPinOfComesteroMoney || transaction.inputPin == inputPinOfNayaxCreditCard))
-      {
-        for (int i = 0; i < transaction.creditCount; i++)
-        {
-          digitalWrite(outputPinOfCarWashReceiverCH1, HIGH);
-          digitalWrite(outputPinOfCashRegister, HIGH);
-          delay(outputSignalWidth);
-          digitalWrite(outputPinOfCarWashReceiverCH1, LOW);
-          digitalWrite(outputPinOfCashRegister, LOW);
-          delay(outputSignalWidth);
-        }
-        Serial.println(" i zafiskalizowano");
-      }
-      else
-      {
-        for (int i = 0; i < transaction.creditCount; i++)
-        {
-          digitalWrite(outputPinOfCarWashReceiverCH2, HIGH);
-          delay(outputSignalWidth);
-          digitalWrite(outputPinOfCarWashReceiverCH2, LOW);
-          delay(outputSignalWidth);
-        }
-        Serial.println(" i niezafiskalizowano");
-      }
+      OutputTransactionData outputTransaction;
+      outputTransaction.creditCount = transaction.creditCount;
+      outputTransaction.outputPin = getOutputPin(transaction.inputPin);
+      outputTransaction.shouldBeTaxed = shouldThisPinBeTaxed(transaction.inputPin);
+      sendTransactionToPin(outputTransaction);
+      logTransaction(outputTransaction);
     }
     else
     {
@@ -241,16 +221,16 @@ void sendOutputDataTask(void *pvParameters)
 
 void initPins()
 {
-  //Inputs
+  // Inputs
   pinMode(inputPinOfComesteroMoney, INPUT_PULLUP);
   pinMode(inputPinOfComesteroToken, INPUT_PULLUP);
   pinMode(inputPinOfNayaxCreditCard, INPUT_PULLUP);
   pinMode(inputPinOfNayaxPrepaidCard, INPUT_PULLUP);
-  //Outputs
+  // Outputs
   pinMode(outputPinOfCarWashReceiverCH1, OUTPUT);
   pinMode(outputPinOfCarWashReceiverCH2, OUTPUT);
   pinMode(outputPinOfCashRegister, OUTPUT);
-  //Supply
+  // Supply
   pinMode(outputPinOfNayaxSupply, OUTPUT);
   digitalWrite(outputPinOfNayaxSupply, HIGH);
   pinMode(outputPinOfComesteroSupply, OUTPUT);
@@ -321,7 +301,7 @@ void handleTaxingJsonRequest(AsyncWebServerRequest *request, JsonVariant &reques
   request->send(responseCode, "application/json", responseBody);
 }
 
-bool isChecksumValid(String time, String checksum) // base64
+bool isChecksumValid(String time, String checksum)
 {
   time = time + salt;
   String calculatedChecksum = base64::encode(time);
@@ -364,4 +344,54 @@ bool startMoneyProcessingSystem()
   digitalWrite(outputPinOfNayaxSupply, LOW);
   digitalWrite(outputPinOfComesteroSupply, LOW);
   return true;
+}
+
+void sendTransactionToPin(OutputTransactionData outcomingTransaction)
+{
+  for (int i = 0; i < outcomingTransaction.creditCount; i++)
+  {
+    digitalWrite(outcomingTransaction.outputPin, HIGH);
+    if (outcomingTransaction.shouldBeTaxed)
+      digitalWrite(outputPinOfCashRegister, HIGH);
+    delay(outputSignalWidth);
+
+    digitalWrite(outcomingTransaction.outputPin, LOW);
+    if (outcomingTransaction.shouldBeTaxed)
+      digitalWrite(outputPinOfCashRegister, LOW);
+    delay(outputSignalWidth);
+  }
+}
+
+bool shouldThisPinBeTaxed(unsigned short pin)
+{
+  if (pin == inputPinOfNayaxCreditCard ||
+      (pin == inputPinOfComesteroMoney && isTaxingEnabled))
+    return true;
+  else
+    return false;
+}
+
+unsigned short getOutputPin(unsigned short inputPin)
+{
+  if (inputPin == inputPinOfNayaxCreditCard || inputPin == inputPinOfNayaxPrepaidCard)
+    return outputPinOfCarWashReceiverCH2;
+  else
+    return outputPinOfCarWashReceiverCH1;
+}
+
+void logTransaction(OutputTransactionData transaction)
+{
+  Serial.print("Wartosc: ");
+  Serial.print(transaction.creditCount);
+  Serial.print(" do pinu: ");
+  Serial.print(transaction.outputPin);
+  transaction.shouldBeTaxed ? Serial.println(" zafiskalizowana") : Serial.println(" niezafiskalizowana");
+}
+
+void logTransaction(TransactionData transaction)
+{
+  Serial.print("Wartosc: ");
+  Serial.print(transaction.creditCount);
+  Serial.print(" z pinu: ");
+  Serial.println(transaction.inputPin);
 }
