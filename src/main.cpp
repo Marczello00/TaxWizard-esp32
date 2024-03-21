@@ -60,6 +60,7 @@ bool startFilesystem();
 void getFsInfo(fsInfo_t *fsInfo);
 void handleTaxingRequest(AsyncWebServerRequest *request);
 void handleTaxingJsonRequest(AsyncWebServerRequest *request, JsonVariant &requestJson);
+void handleTransactionJsonRequest(AsyncWebServerRequest *request, JsonVariant &requestJson);
 bool isChecksumValid(String time, String checksum);
 bool assignNewTaxing(unsigned short newTaxing);
 void initPins();
@@ -117,8 +118,10 @@ void setup()
   server.setFsInfoCallback(getFsInfo);
   // Listening to routes
   server.on("/taxing", HTTP_GET, handleTaxingRequest);
-  AsyncCallbackJsonWebHandler *handler = new AsyncCallbackJsonWebHandler("/taxing", handleTaxingJsonRequest);
-  server.addHandler(handler);
+  AsyncCallbackJsonWebHandler *taxingPostHandler = new AsyncCallbackJsonWebHandler("/taxing", handleTaxingJsonRequest);
+  server.addHandler(taxingPostHandler);
+  AsyncCallbackJsonWebHandler *transactionPostHandler = new AsyncCallbackJsonWebHandler("/transaction", handleTransactionJsonRequest);
+  server.addHandler(transactionPostHandler);
   // Start server
   server.init();
 
@@ -198,7 +201,7 @@ void listenToInputTask(void *pvParameters)
  */
 void sendOutputDataTask(void *pvParameters)
 {
-  Serial.print("Zadanie wysylania rozpoczete");
+  Serial.println("Zadanie wysylania rozpoczete");
   TransactionData transaction;
 
   for (;;)
@@ -297,6 +300,34 @@ void handleTaxingJsonRequest(AsyncWebServerRequest *request, JsonVariant &reques
       responseCode = 400;
   else
     responseCode = 401;
+  serializeJson(responseDoc, responseBody);
+  request->send(responseCode, "application/json", responseBody);
+}
+
+void handleTransactionJsonRequest(AsyncWebServerRequest *request, JsonVariant &requestJson)
+{
+  JsonObject requestJsonObj = requestJson.as<JsonObject>();
+  unsigned short creditCount = requestJsonObj["creditCount"] | 0;
+  unsigned short responseCode = 500;
+  if (creditCount > 0 && creditCount <= 20)
+  {
+    TransactionData transaction;
+    transaction.creditCount = creditCount;
+    transaction.inputPin = inputPinOfNayaxPrepaidCard;
+    if (xQueueSendToBack(TransactionsQueue, &transaction, (TickType_t)10) == pdPASS)
+    {
+      logTransaction(transaction);
+      responseCode = 200;
+    }
+    else
+      responseCode = 507;
+  }
+  else
+    responseCode = 400;
+  JsonDocument responseDoc;
+  JsonObject responseJsonObj = responseDoc.to<JsonObject>();
+  String responseBody = "";
+
   serializeJson(responseDoc, responseBody);
   request->send(responseCode, "application/json", responseBody);
 }
