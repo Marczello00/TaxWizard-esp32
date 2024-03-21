@@ -28,6 +28,8 @@ const int inputPinOfNayaxPrepaidCard = 7;
 const int outputPinOfCarWashReceiverCH1 = 11;
 const int outputPinOfCarWashReceiverCH2 = 12;
 const int outputPinOfCashRegister = 13;
+const int outputPinOfNayaxSupply = 17;
+const int outputPinOfComesteroSupply = 18;
 
 bool isTaxingEnabled = false;
 String salt = "sól";
@@ -38,34 +40,29 @@ const unsigned long endOfInputSequenceWidth = 100;
 
 QueueHandle_t TransactionsQueue;
 
+IPAddress myIP;
 AsyncFsWebServer server(80, LittleFS, "myServer");
 int testInt = 150;
 float testFloat = 123.456;
 
-// Functions declarations
+//Functions declarations
 
 void listenToInputTask(void *pvParameters);
 void sendOutputDataTask(void *pvParameters);
 bool startFilesystem();
 void getFsInfo(fsInfo_t *fsInfo);
 void handleTaxingRequest(AsyncWebServerRequest *request);
-bool isChecksumValid(String time, String checksum);
-bool assignNewTaxing(short newTaxing);
 void handleTaxingJsonRequest(AsyncWebServerRequest *request, JsonVariant &requestJson);
+bool isChecksumValid(String time, String checksum);
+bool assignNewTaxing(unsigned short newTaxing);
+void initPins();
+bool startMoneyProcessingSystem();
 
 void setup()
 {
   Serial.begin(115200);
   delay(10);
-  pinMode(inputPinOfComesteroMoney, INPUT_PULLUP);
-  pinMode(inputPinOfComesteroToken, INPUT_PULLUP);
-  pinMode(inputPinOfNayaxCreditCard, INPUT_PULLUP);
-  pinMode(inputPinOfNayaxPrepaidCard, INPUT_PULLUP);
-  pinMode(outputPinOfCarWashReceiverCH1, OUTPUT);
-  pinMode(outputPinOfCarWashReceiverCH2, OUTPUT);
-  pinMode(outputPinOfCashRegister, OUTPUT);
-
-  TransactionsQueue = xQueueCreate(10, sizeof(TransactionData));
+  initPins();
   delay(1000);
 
   /* Start FileSystem */
@@ -89,7 +86,7 @@ void setup()
   }
 
   // Start WiFi
-  IPAddress myIP = server.startWiFi(15000, "ESP32_AP1234", "123456789");
+  myIP = server.startWiFi(15000, "ESP32_AP1234", "123456789");
   WiFi.setSleep(WIFI_PS_NONE);
   if (WiFi.status() != WL_CONNECTED)
   {
@@ -110,31 +107,17 @@ void setup()
   server.on("/taxing", HTTP_GET, handleTaxingRequest);
   AsyncCallbackJsonWebHandler *handler = new AsyncCallbackJsonWebHandler("/taxing", handleTaxingJsonRequest);
   server.addHandler(handler);
-
   // Start server
   server.init();
+
+
   Serial.print(F("Async ESP Web Server started on IP Address: "));
   Serial.println(myIP);
   Serial.println(F(
       "Open /setup page to configure optional parameters.\n"
       "Open /edit page to view, edit or upload example or your custom webserver source files."));
 
-  // Starting IO tasks
-  // Receiving data from comestero money channel
-  xTaskCreate(listenToInputTask, "Task1", 10000, (void *)&inputPinOfComesteroMoney, 1, &Task1);
-  delay(500);
-  // Receiving data from comestero token channel
-  xTaskCreate(listenToInputTask, "Task2", 10000, (void *)&inputPinOfComesteroToken, 1, &Task2);
-  delay(500);
-  // Receiving data from nayax credit card channel
-  xTaskCreate(listenToInputTask, "Task3", 10000, (void *)&inputPinOfNayaxCreditCard, 1, &Task3);
-  delay(500);
-  // Receiving data from nayax prepaid card channel
-  xTaskCreate(listenToInputTask, "Task4", 10000, (void *)&inputPinOfNayaxPrepaidCard, 1, &Task4);
-  delay(500);
-  // Sending data to outputs
-  xTaskCreate(sendOutputDataTask, "Task5", 10000, NULL, 1, &Task5);
-  delay(500);
+  startMoneyProcessingSystem();
 }
 
 void loop()
@@ -256,6 +239,24 @@ void sendOutputDataTask(void *pvParameters)
   }
 }
 
+void initPins()
+{
+  //Inputs
+  pinMode(inputPinOfComesteroMoney, INPUT_PULLUP);
+  pinMode(inputPinOfComesteroToken, INPUT_PULLUP);
+  pinMode(inputPinOfNayaxCreditCard, INPUT_PULLUP);
+  pinMode(inputPinOfNayaxPrepaidCard, INPUT_PULLUP);
+  //Outputs
+  pinMode(outputPinOfCarWashReceiverCH1, OUTPUT);
+  pinMode(outputPinOfCarWashReceiverCH2, OUTPUT);
+  pinMode(outputPinOfCashRegister, OUTPUT);
+  //Supply
+  pinMode(outputPinOfNayaxSupply, OUTPUT);
+  digitalWrite(outputPinOfNayaxSupply, HIGH);
+  pinMode(outputPinOfComesteroSupply, OUTPUT);
+  digitalWrite(outputPinOfComesteroSupply, HIGH);
+}
+
 bool startFilesystem()
 {
   if (LittleFS.begin())
@@ -287,38 +288,22 @@ void getFsInfo(fsInfo_t *fsInfo)
 
 void handleTaxingRequest(AsyncWebServerRequest *request)
 {
-  // TODO: this function transform to only reading taxing status with json response
-  static int value = 0;
-  String reply = "Taxing is ";
-  // http://xxx.xxx.xxx.xxx/taxing?val=1
-  if (request->hasParam("val"))
-  {
-    value = request->arg("val").toInt();
-    if (value)
-    {
-      isTaxingEnabled = true;
-      reply += "set to ON";
-    }
-    else
-    {
-      isTaxingEnabled = false;
-      reply += "set to OFF";
-    }
-  }
-  else
-  {
-    reply += isTaxingEnabled ? "ON" : "OFF";
-  }
-  request->send(200, "text/plain", reply);
+  unsigned short responseCode = 200;
+  JsonDocument responseDoc;
+  JsonObject responseJsonObj = responseDoc.to<JsonObject>();
+  String responseBody = "";
+  responseJsonObj["taxing"] = isTaxingEnabled;
+  serializeJson(responseDoc, responseBody);
+  request->send(responseCode, "application/json", responseBody);
 }
 
 void handleTaxingJsonRequest(AsyncWebServerRequest *request, JsonVariant &requestJson)
 {
   JsonObject requestJsonObj = requestJson.as<JsonObject>();
-  short newTaxing = requestJsonObj["taxing"] | -1;
+  unsigned short newTaxing = requestJsonObj["taxing"] | -1;
   String time = requestJsonObj["time"] | " ";
   String checksum = requestJsonObj["checksum"] | " ";
-  short responseCode = 500;
+  unsigned short responseCode = 500;
   JsonDocument responseDoc;
   JsonObject responseJsonObj = responseDoc.to<JsonObject>();
   String responseBody = "";
@@ -346,7 +331,7 @@ bool isChecksumValid(String time, String checksum) // base64
     return false;
 }
 
-bool assignNewTaxing(short newTaxing)
+bool assignNewTaxing(unsigned short newTaxing)
 {
   if (newTaxing == 1)
     isTaxingEnabled = true;
@@ -354,5 +339,29 @@ bool assignNewTaxing(short newTaxing)
     isTaxingEnabled = false;
   else
     return false;
+  return true;
+}
+
+bool startMoneyProcessingSystem()
+{
+  TransactionsQueue = xQueueCreate(10, sizeof(TransactionData));
+  // Receiving data from comestero money channel
+  xTaskCreate(listenToInputTask, "Task1", 10000, (void *)&inputPinOfComesteroMoney, 1, &Task1);
+  delay(500);
+  // Receiving data from comestero token channel
+  xTaskCreate(listenToInputTask, "Task2", 10000, (void *)&inputPinOfComesteroToken, 1, &Task2);
+  delay(500);
+  // Receiving data from nayax credit card channel
+  xTaskCreate(listenToInputTask, "Task3", 10000, (void *)&inputPinOfNayaxCreditCard, 1, &Task3);
+  delay(500);
+  // Receiving data from nayax prepaid card channel
+  xTaskCreate(listenToInputTask, "Task4", 10000, (void *)&inputPinOfNayaxPrepaidCard, 1, &Task4);
+  delay(500);
+  // Sending data to outputs
+  xTaskCreate(sendOutputDataTask, "Task5", 10000, NULL, 1, &Task5);
+  delay(500);
+  // Start the 24V supply to Comestero and Nayax devices
+  digitalWrite(outputPinOfNayaxSupply, LOW);
+  digitalWrite(outputPinOfComesteroSupply, LOW);
   return true;
 }
