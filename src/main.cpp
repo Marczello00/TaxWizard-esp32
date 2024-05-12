@@ -38,7 +38,7 @@ const unsigned short outputPinOfCashRegister = 13;
 const unsigned short outputPinOfNayaxSupply = 17;
 const unsigned short outputPinOfComesteroSupply = 18;
 
-bool isTaxingEnabled = false;
+bool isTaxingEnabled;
 String salt = "sól";
 
 const unsigned long inputSignalWidth = 15;
@@ -70,6 +70,8 @@ bool shouldThisPinBeTaxed(unsigned short pin);
 unsigned short getOutputPin(unsigned short inputPin);
 void logTransaction(OutputTransactionData transaction);
 void logTransaction(TransactionData transaction);
+bool loadTaxingStatus();
+void saveTaxingStatus();
 
 void setup()
 {
@@ -131,6 +133,8 @@ void setup()
       "Open /setup page to configure optional parameters.\n"
       "Open /edit page to view, edit or upload example or your custom webserver source files."));
 
+  if(!loadTaxingStatus())
+    assignNewTaxing(1);
   startMoneyProcessingSystem();
 }
 
@@ -345,12 +349,25 @@ bool isChecksumValid(String time, String checksum)
 bool assignNewTaxing(unsigned short newTaxing)
 {
   if (newTaxing == 1)
-    isTaxingEnabled = true;
+    if(isTaxingEnabled)
+      return true;
+    else
+    {
+      isTaxingEnabled = true;
+      saveTaxingStatus();
+      return true;
+    }
   else if (newTaxing == 0)
-    isTaxingEnabled = false;
+    if(isTaxingEnabled)
+    {
+      isTaxingEnabled = false;
+      saveTaxingStatus();
+      return true;
+    }
+    else
+      return true;
   else
     return false;
-  return true;
 }
 
 bool startMoneyProcessingSystem()
@@ -425,4 +442,25 @@ void logTransaction(TransactionData transaction)
   Serial.print(transaction.creditCount);
   Serial.print(" z pinu: ");
   Serial.println(transaction.inputPin);
+}
+
+bool loadTaxingStatus()
+{
+  File taxingFile = LittleFS.open("/config/lastTaxingStatus.json", "r");
+  if (!taxingFile)
+    return false;
+  JsonDocument doc;
+  deserializeJson(doc, taxingFile);
+  isTaxingEnabled = doc["taxing"];
+  taxingFile.close();
+  return true;
+}
+
+void saveTaxingStatus()
+{
+  File taxingFile = LittleFS.open("/config/lastTaxingStatus.json", "w");
+  JsonDocument doc;
+  doc["taxing"] = isTaxingEnabled;
+  serializeJson(doc, taxingFile);
+  taxingFile.close();
 }
