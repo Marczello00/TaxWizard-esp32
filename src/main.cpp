@@ -185,6 +185,7 @@ void listenToInputTask(void *pvParameters)
     {
       blockInputFlag = false;
     }
+    delay(10);
 
     if (currentTime - lastActivationTime >= endOfInputSequenceWidth)
       if (creditCount > 0)
