@@ -28,29 +28,32 @@ TaskHandle_t Task3;
 TaskHandle_t Task4;
 TaskHandle_t Task5;
 
-const unsigned short inputPinOfComesteroMoney = 4;
-const unsigned short inputPinOfComesteroToken = 5;
-const unsigned short inputPinOfNayaxCreditCard = 6;
-const unsigned short inputPinOfNayaxPrepaidCard = 7;
-const unsigned short outputPinOfCarWashReceiverCH1 = 11;
-const unsigned short outputPinOfCarWashReceiverCH2 = 12;
-const unsigned short outputPinOfCashRegister = 13;
+const unsigned short inputPinOfComesteroMoney = 5;
+const unsigned short inputPinOfComesteroToken = 4;
+const unsigned short inputPinOfNayaxCreditCard = 7;
+const unsigned short inputPinOfNayaxPrepaidCard = 6;
+const unsigned short inputPinOfCarWashMonitoring = 15;
+const unsigned short inputPinOfWebTransaction = 99;
+const unsigned short outputPinOfCarWashReceiverCH1 = 10;
+const unsigned short outputPinOfCarWashReceiverCH2 = 11;
+const unsigned short outputPinOfCashRegister = 12;
 const unsigned short outputPinOfNayaxSupply = 17;
 const unsigned short outputPinOfComesteroSupply = 18;
 
 bool isTaxingEnabled;
+bool isComesteroSupplyEnabled = true;
+bool isNayaxSupplyEnabled = true;
 String salt = "sól";
 
-const unsigned long inputSignalWidth = 15;
-const unsigned long outputSignalWidth = 150;
-const unsigned long endOfInputSequenceWidth = 100;
+unsigned long inputSignalWidth = 150;
+unsigned long outputSignalWidth = 150;
+char inputSignalWidthName[40] = "Szerokość sygnału wejściowego [ms]";
+char outputSignalWidthName[40] = "Szerokość sygnału wyjściowego [ms]";
 
 QueueHandle_t TransactionsQueue;
 
 IPAddress myIP;
 AsyncFsWebServer server(80, LittleFS, "myServer");
-int testInt = 150;
-float testFloat = 123.456;
 
 // Functions declarations
 
@@ -59,6 +62,7 @@ void sendOutputDataTask(void *pvParameters);
 bool startFilesystem();
 void getFsInfo(fsInfo_t *fsInfo);
 void handleTaxingRequest(AsyncWebServerRequest *request);
+void handleStatusRequest(AsyncWebServerRequest *request);
 void handleTaxingJsonRequest(AsyncWebServerRequest *request, JsonVariant &requestJson);
 void handleTransactionJsonRequest(AsyncWebServerRequest *request, JsonVariant &requestJson);
 bool isChecksumValid(String time, String checksum);
@@ -72,36 +76,32 @@ void logTransaction(OutputTransactionData transaction);
 void logTransaction(TransactionData transaction);
 bool loadTaxingStatus();
 void saveTaxingStatus();
+bool loadConfigFile();
 
 void setup()
 {
   Serial.begin(115200);
-  delay(10);
+
   initPins();
-  delay(1000);
 
   /* Start FileSystem */
   if (startFilesystem())
-  {
     Serial.println("LittleFS filesystem ready!");
-    File config = server.getConfigFile("r");
-    if (config)
-    {
-      DynamicJsonDocument doc(config.size() * 1.33);
-      deserializeJson(doc, config);
-      testInt = doc["Test int variable"];
-      testFloat = doc["Test float variable"];
-    }
-    Serial.printf("Stored \"testInt\" value: %d\n", testInt);
-    Serial.printf("Stored \"testFloat\" value: %3.2f\n", testFloat);
-  }
   else
-  {
     Serial.println("LittleFS error!");
-  }
+
+  if (loadConfigFile())
+    Serial.println("Config file loaded!");
+  else
+    Serial.println("Config file not loaded!");
 
   // Start WiFi
-  myIP = server.startWiFi(15000, "ESP32_AP1234", "123456789");
+  int randomNumber = random(1000);
+  char randomNumberchar[10];
+  itoa(randomNumber, randomNumberchar, 10);
+  char APName[30] = "ESP32_AP";
+  String APNameWithRandom = String(APName) + randomNumberchar;
+  myIP = server.startWiFi(15000, APNameWithRandom.c_str(), "1234567890");
   WiFi.setSleep(WIFI_PS_NONE);
   if (WiFi.status() != WL_CONNECTED)
   {
@@ -111,15 +111,16 @@ void setup()
   }
 
   // Config server
-  server.addOptionBox("Custom options");
-  server.addOption("Test int variable", testInt);
-  server.addOption("Test float variable", testFloat);
-  server.setSetupPageTitle("Simple Async ESP FS WebServer");
+  server.addOptionBox("Szerokości sygnałów");
+  server.addOption(inputSignalWidthName, inputSignalWidth);
+  server.addOption(outputSignalWidthName, outputSignalWidth);
+  server.setSetupPageTitle("TaxWizard - Majcher");
   // Enable ACE FS file web editor and add FS info callback fucntion
   server.enableFsCodeEditor();
   server.setFsInfoCallback(getFsInfo);
   // Listening to routes
   server.on("/taxing", HTTP_GET, handleTaxingRequest);
+  server.on("/myStatus", HTTP_GET, handleStatusRequest);
   AsyncCallbackJsonWebHandler *taxingPostHandler = new AsyncCallbackJsonWebHandler("/taxing", handleTaxingJsonRequest);
   server.addHandler(taxingPostHandler);
   AsyncCallbackJsonWebHandler *transactionPostHandler = new AsyncCallbackJsonWebHandler("/transaction", handleTransactionJsonRequest);
@@ -133,7 +134,7 @@ void setup()
       "Open /setup page to configure optional parameters.\n"
       "Open /edit page to view, edit or upload example or your custom webserver source files."));
 
-  if(!loadTaxingStatus())
+  if (!loadTaxingStatus())
     assignNewTaxing(1);
   startMoneyProcessingSystem();
 }
@@ -168,9 +169,9 @@ void listenToInputTask(void *pvParameters)
     int inputState = digitalRead(inputPin);
     currentTime = millis();
 
-    if (inputState == LOW)
+    if (inputState == HIGH)
     {
-      if (!blockInputFlag && currentTime - lastActivationTime >= inputSignalWidth)
+      if ((!blockInputFlag) && ((currentTime - lastActivationTime) >= inputSignalWidth))
       {
         lastActivationTime = currentTime;
         blockInputFlag = true;
@@ -185,9 +186,8 @@ void listenToInputTask(void *pvParameters)
     {
       blockInputFlag = false;
     }
-    delay(10);
 
-    if (currentTime - lastActivationTime >= endOfInputSequenceWidth)
+    if ((currentTime - lastActivationTime) > (round(inputSignalWidth*3)))
       if (creditCount > 0)
       {
         incomingTransaction.creditCount = creditCount;
@@ -197,6 +197,8 @@ void listenToInputTask(void *pvParameters)
           Serial.println("Błąd przy dodawaniu do kolejki!");
         creditCount = 0;
       }
+      
+    delay(1);
   }
 }
 
@@ -219,6 +221,7 @@ void sendOutputDataTask(void *pvParameters)
       outputTransaction.shouldBeTaxed = shouldThisPinBeTaxed(transaction.inputPin);
       sendTransactionToPin(outputTransaction);
       logTransaction(outputTransaction);
+      delay(200);
     }
     else
     {
@@ -230,10 +233,11 @@ void sendOutputDataTask(void *pvParameters)
 void initPins()
 {
   // Inputs
-  pinMode(inputPinOfComesteroMoney, INPUT_PULLUP);
-  pinMode(inputPinOfComesteroToken, INPUT_PULLUP);
-  pinMode(inputPinOfNayaxCreditCard, INPUT_PULLUP);
-  pinMode(inputPinOfNayaxPrepaidCard, INPUT_PULLUP);
+  pinMode(inputPinOfComesteroMoney, INPUT_PULLDOWN);
+  pinMode(inputPinOfComesteroToken, INPUT_PULLDOWN);
+  pinMode(inputPinOfNayaxCreditCard, INPUT_PULLDOWN);
+  pinMode(inputPinOfNayaxPrepaidCard, INPUT_PULLDOWN);
+  pinMode(inputPinOfCarWashMonitoring, INPUT_PULLUP);
   // Outputs
   pinMode(outputPinOfCarWashReceiverCH1, OUTPUT);
   pinMode(outputPinOfCarWashReceiverCH2, OUTPUT);
@@ -285,6 +289,21 @@ void handleTaxingRequest(AsyncWebServerRequest *request)
   request->send(responseCode, "application/json", responseBody);
 }
 
+void handleStatusRequest(AsyncWebServerRequest *request)
+{
+  unsigned short responseCode = 200;
+  JsonDocument responseDoc;
+  JsonObject responseJsonObj = responseDoc.to<JsonObject>();
+  String responseBody = "";
+  responseJsonObj["taxing"] = isTaxingEnabled;
+  responseJsonObj["inputSignalWidth"] = inputSignalWidth;
+  responseJsonObj["outputSignalWidth"] = outputSignalWidth;
+  responseJsonObj["comesteroSupply"] = isComesteroSupplyEnabled;
+  responseJsonObj["nayaxSupply"] = isNayaxSupplyEnabled;
+  serializeJson(responseDoc, responseBody);
+  request->send(responseCode, "application/json", responseBody);
+}
+
 void handleTaxingJsonRequest(AsyncWebServerRequest *request, JsonVariant &requestJson)
 {
   JsonObject requestJsonObj = requestJson.as<JsonObject>();
@@ -318,7 +337,7 @@ void handleTransactionJsonRequest(AsyncWebServerRequest *request, JsonVariant &r
   {
     TransactionData transaction;
     transaction.creditCount = creditCount;
-    transaction.inputPin = inputPinOfNayaxPrepaidCard;
+    transaction.inputPin = inputPinOfWebTransaction;
     if (xQueueSendToBack(TransactionsQueue, &transaction, (TickType_t)10) == pdPASS)
     {
       logTransaction(transaction);
@@ -350,7 +369,7 @@ bool isChecksumValid(String time, String checksum)
 bool assignNewTaxing(unsigned short newTaxing)
 {
   if (newTaxing == 1)
-    if(isTaxingEnabled)
+    if (isTaxingEnabled)
       return true;
     else
     {
@@ -359,7 +378,7 @@ bool assignNewTaxing(unsigned short newTaxing)
       return true;
     }
   else if (newTaxing == 0)
-    if(isTaxingEnabled)
+    if (isTaxingEnabled)
     {
       isTaxingEnabled = false;
       saveTaxingStatus();
@@ -422,7 +441,7 @@ bool shouldThisPinBeTaxed(unsigned short pin)
 
 unsigned short getOutputPin(unsigned short inputPin)
 {
-  if (inputPin == inputPinOfNayaxCreditCard || inputPin == inputPinOfNayaxPrepaidCard)
+  if (inputPin == inputPinOfNayaxCreditCard || inputPin == inputPinOfNayaxPrepaidCard || inputPin == inputPinOfWebTransaction)
     return outputPinOfCarWashReceiverCH2;
   else
     return outputPinOfCarWashReceiverCH1;
@@ -464,4 +483,20 @@ void saveTaxingStatus()
   doc["taxing"] = isTaxingEnabled;
   serializeJson(doc, taxingFile);
   taxingFile.close();
+}
+
+bool loadConfigFile()
+{
+  File config = server.getConfigFile("r");
+  if (config)
+  {
+    JsonDocument configJson;
+    deserializeJson(configJson, config);
+    inputSignalWidth = configJson[inputSignalWidthName] | 150;
+    outputSignalWidth = configJson[outputSignalWidthName] | 150;
+    config.close();
+    return true;
+  }
+  else
+    return false;
 }
