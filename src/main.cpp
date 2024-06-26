@@ -72,6 +72,7 @@ bool startMoneyProcessingSystem();
 void sendTransactionToPin(OutputTransactionData outcomingTransaction);
 bool shouldThisPinBeTaxed(unsigned short pin);
 unsigned short getOutputPin(unsigned short inputPin);
+bool getCarWashStatus();
 void logTransaction(OutputTransactionData transaction);
 void logTransaction(TransactionData transaction);
 bool loadTaxingStatus();
@@ -111,6 +112,7 @@ void setup()
   }
 
   // Config server
+  server.setFirmwareVersion("1.0.0-dev");
   server.addOptionBox("Szerokości sygnałów");
   server.addOption(inputSignalWidthName, inputSignalWidth);
   server.addOption(outputSignalWidthName, outputSignalWidth);
@@ -187,7 +189,7 @@ void listenToInputTask(void *pvParameters)
       blockInputFlag = false;
     }
 
-    if ((currentTime - lastActivationTime) > (round(inputSignalWidth*3)))
+    if ((currentTime - lastActivationTime) > (round(inputSignalWidth * 3)))
       if (creditCount > 0)
       {
         incomingTransaction.creditCount = creditCount;
@@ -197,7 +199,7 @@ void listenToInputTask(void *pvParameters)
           Serial.println("Błąd przy dodawaniu do kolejki!");
         creditCount = 0;
       }
-      
+
     delay(1);
   }
 }
@@ -237,7 +239,7 @@ void initPins()
   pinMode(inputPinOfComesteroToken, INPUT_PULLDOWN);
   pinMode(inputPinOfNayaxCreditCard, INPUT_PULLDOWN);
   pinMode(inputPinOfNayaxPrepaidCard, INPUT_PULLDOWN);
-  pinMode(inputPinOfCarWashMonitoring, INPUT_PULLUP);
+  pinMode(inputPinOfCarWashMonitoring, INPUT_PULLDOWN);
   // Outputs
   pinMode(outputPinOfCarWashReceiverCH1, OUTPUT);
   pinMode(outputPinOfCarWashReceiverCH2, OUTPUT);
@@ -295,11 +297,12 @@ void handleStatusRequest(AsyncWebServerRequest *request)
   JsonDocument responseDoc;
   JsonObject responseJsonObj = responseDoc.to<JsonObject>();
   String responseBody = "";
-  responseJsonObj["taxing"] = isTaxingEnabled;
+  responseJsonObj["isTaxingEnabled"] = isTaxingEnabled;
+  responseJsonObj["isCarWashWorking"] = getCarWashStatus();
   responseJsonObj["inputSignalWidth"] = inputSignalWidth;
   responseJsonObj["outputSignalWidth"] = outputSignalWidth;
-  responseJsonObj["comesteroSupply"] = isComesteroSupplyEnabled;
-  responseJsonObj["nayaxSupply"] = isNayaxSupplyEnabled;
+  responseJsonObj["isComesteroSupplyON"] = isComesteroSupplyEnabled;
+  responseJsonObj["isNayaxSupplyON"] = isNayaxSupplyEnabled;
   serializeJson(responseDoc, responseBody);
   request->send(responseCode, "application/json", responseBody);
 }
@@ -445,6 +448,11 @@ unsigned short getOutputPin(unsigned short inputPin)
     return outputPinOfCarWashReceiverCH2;
   else
     return outputPinOfCarWashReceiverCH1;
+}
+
+bool getCarWashStatus()
+{
+  return digitalRead(inputPinOfCarWashMonitoring) == LOW ? true : false;
 }
 
 void logTransaction(OutputTransactionData transaction)
