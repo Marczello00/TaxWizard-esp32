@@ -5,9 +5,12 @@
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer/src/AsyncJson.h>
 #include <base64.h>
+#include <HTTPClient.h>
 
 #define LED_PIN 65
 #define LED_COUNT 1
+#define FIRMWARE_VERSION "1.1.0"
+#define FIRMWARE_NAME "-dev"
 
 typedef struct
 {
@@ -17,9 +20,10 @@ typedef struct
 
 typedef struct
 {
+  unsigned short inputPin;
   unsigned short creditCount;
   unsigned short outputPin;
-  bool shouldBeTaxed;
+  bool willBeTaxed;
 } OutputTransactionData;
 
 TaskHandle_t Task1;
@@ -27,13 +31,14 @@ TaskHandle_t Task2;
 TaskHandle_t Task3;
 TaskHandle_t Task4;
 TaskHandle_t Task5;
+TaskHandle_t Task6;
 
 const unsigned short inputPinOfComesteroMoney = 5;
 const unsigned short inputPinOfComesteroToken = 4;
 const unsigned short inputPinOfNayaxCreditCard = 7;
 const unsigned short inputPinOfNayaxPrepaidCard = 6;
-const unsigned short inputPinOfCarWashMonitoring = 15;
 const unsigned short inputPinOfWebTransaction = 99;
+const unsigned short inputPinOfCarWashMonitoring = 15;
 const unsigned short outputPinOfCarWashReceiverCH1 = 10;
 const unsigned short outputPinOfCarWashReceiverCH2 = 11;
 const unsigned short outputPinOfCashRegister = 12;
@@ -47,8 +52,15 @@ String salt = "sól";
 
 unsigned long inputSignalWidth = 150;
 unsigned long outputSignalWidth = 150;
+unsigned short stationNumber = 0;
+String serverIP = "255.255.255.255";
+String stationType = "Myjnia|Odkurzacz|Akcesoria";
+
 char inputSignalWidthName[40] = "Szerokość sygnału wejściowego [ms]";
 char outputSignalWidthName[40] = "Szerokość sygnału wyjściowego [ms]";
+char stationNumberName[40] = "Numer stanowiska";
+char stationTypeName[40] = "Typ stanowiska";
+char serverIPName[40] = "Adres IP serwera zarządzającego";
 
 QueueHandle_t TransactionsQueue;
 
@@ -59,6 +71,7 @@ AsyncFsWebServer server(80, LittleFS, "myServer");
 
 void listenToInputTask(void *pvParameters);
 void sendOutputDataTask(void *pvParameters);
+void logTransactionToWeb(void *pvParameters);
 bool startFilesystem();
 void getFsInfo(fsInfo_t *fsInfo);
 void handleTaxingRequest(AsyncWebServerRequest *request);
@@ -78,6 +91,7 @@ void logTransaction(TransactionData transaction);
 bool loadTaxingStatus();
 void saveTaxingStatus();
 bool loadConfigFile();
+String getSourceName(int inputPin);
 
 void setup()
 {
@@ -112,10 +126,14 @@ void setup()
   }
 
   // Config server
-  server.setFirmwareVersion("1.0.0-dev");
+  server.setFirmwareVersion(FIRMWARE_VERSION FIRMWARE_NAME);
   server.addOptionBox("Szerokości sygnałów");
   server.addOption(inputSignalWidthName, inputSignalWidth);
   server.addOption(outputSignalWidthName, outputSignalWidth);
+  server.addOptionBox("Konfiguracja stanowiska");
+  server.addOption(stationNumberName, stationNumber);
+  server.addOption(stationTypeName, stationType);
+  server.addOption(serverIPName, serverIP);
   server.setSetupPageTitle("TaxWizard - Majcher");
   // Enable ACE FS file web editor and add FS info callback fucntion
   server.enableFsCodeEditor();
@@ -218,11 +236,13 @@ void sendOutputDataTask(void *pvParameters)
     if (xQueueReceive(TransactionsQueue, &transaction, (TickType_t)10) == pdPASS)
     {
       OutputTransactionData outputTransaction;
+      outputTransaction.inputPin = transaction.inputPin;
       outputTransaction.creditCount = transaction.creditCount;
       outputTransaction.outputPin = getOutputPin(transaction.inputPin);
-      outputTransaction.shouldBeTaxed = shouldThisPinBeTaxed(transaction.inputPin);
+      outputTransaction.willBeTaxed = shouldThisPinBeTaxed(transaction.inputPin);
       sendTransactionToPin(outputTransaction);
       logTransaction(outputTransaction);
+      xTaskCreate(logTransactionToWeb, "Task6", 10000, (void *)&outputTransaction, 1, &Task6);
       delay(200);
     }
     else
@@ -230,6 +250,52 @@ void sendOutputDataTask(void *pvParameters)
       delay(1000);
     }
   }
+}
+
+void logTransactionToWeb(void *pvParameters)
+{
+  OutputTransactionData *transactionPtr = (OutputTransactionData *)pvParameters;
+  OutputTransactionData transaction = *transactionPtr;
+  String serverName = "http://"+ serverIP +"/api/Transactions";
+  int httpResponseCode = 0;
+  for(int i = 0; httpResponseCode != 201; i++)
+  {
+    if(WiFi.status() == WL_CONNECTED)
+    {
+      Serial.println("podejscie numer:"+String(i)+"/10");
+      WiFiClient client;
+      HTTPClient http;
+      http.begin(client, serverName);
+      http.addHeader("Content-Type", "application/json");
+      JsonDocument PostDoc;
+      JsonObject PostJsonObj = PostDoc.to<JsonObject>();
+      String PostBody = "";
+      PostJsonObj["wasFiscalized"] = transaction.willBeTaxed;
+      PostJsonObj["value"] = transaction.creditCount;
+      PostJsonObj["stationNumber"] = stationNumber;
+      PostJsonObj["stationTypeName"] = stationType;
+      PostJsonObj["transactionSourceName"] = getSourceName(transaction.inputPin);
+      serializeJson(PostDoc, PostBody);
+      httpResponseCode = http.POST(PostBody);
+      if(httpResponseCode > 0)
+      {
+        String response = http.getString();
+        Serial.println(httpResponseCode);
+        Serial.println(response);
+      }
+      else
+      {
+        Serial.println("Error on sending POST request"+String(i)+"/10");
+      }
+    }
+    delay(1000);
+    if(i >= 10)
+    {
+      Serial.println("POST request failed.");
+      break;
+    }
+  }
+  vTaskDelete(NULL);
 }
 
 void initPins()
@@ -422,12 +488,12 @@ void sendTransactionToPin(OutputTransactionData outcomingTransaction)
   for (int i = 0; i < outcomingTransaction.creditCount; i++)
   {
     digitalWrite(outcomingTransaction.outputPin, HIGH);
-    if (outcomingTransaction.shouldBeTaxed)
+    if (outcomingTransaction.willBeTaxed)
       digitalWrite(outputPinOfCashRegister, HIGH);
     delay(outputSignalWidth);
 
     digitalWrite(outcomingTransaction.outputPin, LOW);
-    if (outcomingTransaction.shouldBeTaxed)
+    if (outcomingTransaction.willBeTaxed)
       digitalWrite(outputPinOfCashRegister, LOW);
     delay(outputSignalWidth);
   }
@@ -461,7 +527,7 @@ void logTransaction(OutputTransactionData transaction)
   Serial.print(transaction.creditCount);
   Serial.print(" do pinu: ");
   Serial.print(transaction.outputPin);
-  transaction.shouldBeTaxed ? Serial.println(" zafiskalizowana") : Serial.println(" niezafiskalizowana");
+  transaction.willBeTaxed ? Serial.println(" zafiskalizowana") : Serial.println(" niezafiskalizowana");
 }
 
 void logTransaction(TransactionData transaction)
@@ -502,9 +568,37 @@ bool loadConfigFile()
     deserializeJson(configJson, config);
     inputSignalWidth = configJson[inputSignalWidthName] | 150;
     outputSignalWidth = configJson[outputSignalWidthName] | 150;
+    stationNumber = configJson[stationNumberName] | 0;
+    stationType = configJson[stationTypeName] | "Brak";
+    serverIP = configJson[serverIPName] | "192.168.1.30";
     config.close();
     return true;
   }
   else
     return false;
+}
+
+String getSourceName(int inputPin)
+{
+  switch (inputPin)
+  {
+  case inputPinOfComesteroMoney:
+    return "Gotówka";
+    break;
+  case inputPinOfComesteroToken:
+    return "Żeton";
+    break;
+  case inputPinOfNayaxCreditCard:
+    return "Karta";
+    break;
+  case inputPinOfNayaxPrepaidCard:
+    return "Prepaid";
+    break;
+  case inputPinOfWebTransaction:
+    return "Aplikacja";
+    break;
+  default:  
+    return "Nieznane źródło";
+    break;
+  }
 }
