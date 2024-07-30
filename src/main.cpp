@@ -76,10 +76,11 @@ bool startFilesystem();
 void getFsInfo(fsInfo_t *fsInfo);
 void handleTaxingRequest(AsyncWebServerRequest *request);
 void handleStatusRequest(AsyncWebServerRequest *request);
+void handleProvisionRequest(AsyncWebServerRequest *request);
 void handleTaxingJsonRequest(AsyncWebServerRequest *request, JsonVariant &requestJson);
 void handleTransactionJsonRequest(AsyncWebServerRequest *request, JsonVariant &requestJson);
 bool isChecksumValid(String time, String checksum);
-bool assignNewTaxing(unsigned short newTaxing);
+bool assignNewStatuses(bool newTaxing, bool newComesteroSupply, bool newNayaxSupply);
 void initPins();
 bool startMoneyProcessingSystem();
 void sendTransactionToPin(OutputTransactionData outcomingTransaction);
@@ -88,10 +89,13 @@ unsigned short getOutputPin(unsigned short inputPin);
 bool getCarWashStatus();
 void logTransaction(OutputTransactionData transaction);
 void logTransaction(TransactionData transaction);
-bool loadTaxingStatus();
-void saveTaxingStatus();
+bool loadDeviceStatus();
+void saveDeviceStatus();
 bool loadConfigFile();
 String getSourceName(int inputPin);
+void setIsComesteroWorkingStatus(bool status);
+void setIsNayaxWorkingStatus(bool status);
+void setSupplyStatus(bool status, unsigned short pin);
 
 void setup()
 {
@@ -141,6 +145,7 @@ void setup()
   // Listening to routes
   server.on("/taxing", HTTP_GET, handleTaxingRequest);
   server.on("/myStatus", HTTP_GET, handleStatusRequest);
+  server.on("/provision", HTTP_GET, handleProvisionRequest);
   AsyncCallbackJsonWebHandler *taxingPostHandler = new AsyncCallbackJsonWebHandler("/taxing", handleTaxingJsonRequest);
   server.addHandler(taxingPostHandler);
   AsyncCallbackJsonWebHandler *transactionPostHandler = new AsyncCallbackJsonWebHandler("/transaction", handleTransactionJsonRequest);
@@ -154,9 +159,9 @@ void setup()
       "Open /setup page to configure optional parameters.\n"
       "Open /edit page to view, edit or upload example or your custom webserver source files."));
 
-  if (!loadTaxingStatus())
-    assignNewTaxing(1);
   startMoneyProcessingSystem();
+  if (!loadDeviceStatus())
+    assignNewStatuses(true, true, true);
 }
 
 void loop()
@@ -256,13 +261,12 @@ void logTransactionToWeb(void *pvParameters)
 {
   OutputTransactionData *transactionPtr = (OutputTransactionData *)pvParameters;
   OutputTransactionData transaction = *transactionPtr;
-  String serverName = "http://"+ serverIP +"/api/Transactions";
+  String serverName = "http://" + serverIP + "/api/Transactions";
   int httpResponseCode = 0;
-  for(int i = 0; httpResponseCode != 201; i++)
+  for (int i = 0; httpResponseCode != 201; i++)
   {
-    if(WiFi.status() == WL_CONNECTED)
+    if (WiFi.status() == WL_CONNECTED)
     {
-      Serial.println("podejscie numer:"+String(i)+"/10");
       WiFiClient client;
       HTTPClient http;
       http.begin(client, serverName);
@@ -277,23 +281,19 @@ void logTransactionToWeb(void *pvParameters)
       PostJsonObj["transactionSourceName"] = getSourceName(transaction.inputPin);
       serializeJson(PostDoc, PostBody);
       httpResponseCode = http.POST(PostBody);
-      if(httpResponseCode > 0)
+      if (httpResponseCode != 201)
       {
-        String response = http.getString();
-        Serial.println(httpResponseCode);
-        Serial.println(response);
-      }
-      else
-      {
-        Serial.println("Error on sending POST request"+String(i)+"/10");
+        Serial.println("Error on sending POST request" + String(i) + "/10");
       }
     }
-    delay(1000);
-    if(i >= 10)
+
+    if (i >= 10)
     {
-      Serial.println("POST request failed.");
+      Serial.println("POST request failed. ErrCode:" + String(httpResponseCode));
       break;
     }
+
+    delay(10000);
   }
   vTaskDelete(NULL);
 }
@@ -373,6 +373,40 @@ void handleStatusRequest(AsyncWebServerRequest *request)
   request->send(responseCode, "application/json", responseBody);
 }
 
+void handleProvisionRequest(AsyncWebServerRequest *request)
+{
+  unsigned short responseCode = 500;
+  String serverName = "http://" + serverIP + "/api/stationStatus?stationNumber=" + String(stationNumber) + "&StationTypeName=" + String(stationType);
+  WiFiClient client;
+  HTTPClient http;
+  int httpResponseCode = 0;
+
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    http.begin(client, serverName);
+    httpResponseCode = http.GET();
+    String payload = "{}";
+    if (httpResponseCode > 0)
+    {
+      payload = http.getString();
+    }
+    else
+      http.end();
+    JsonDocument responseDoc;
+    DeserializationError deSerErr = deserializeJson(responseDoc, payload);
+    if (deSerErr == DeserializationError::Ok)
+    {
+      JsonObject responseJsonObj = responseDoc.as<JsonObject>();
+      assignNewStatuses(responseJsonObj["isFiscOn"], responseJsonObj["areCashPaymentsAllowed"], responseJsonObj["areCardPaymentsAllowed"]);
+      responseCode = 200;
+    }
+    else
+      responseCode = 400;
+  }
+
+  request->send(responseCode, "application/json", "Mother-server responded:" + String(httpResponseCode));
+}
+
 void handleTaxingJsonRequest(AsyncWebServerRequest *request, JsonVariant &requestJson)
 {
   JsonObject requestJsonObj = requestJson.as<JsonObject>();
@@ -384,7 +418,7 @@ void handleTaxingJsonRequest(AsyncWebServerRequest *request, JsonVariant &reques
   JsonObject responseJsonObj = responseDoc.to<JsonObject>();
   String responseBody = "";
   if (isChecksumValid(time, checksum))
-    if (assignNewTaxing(newTaxing))
+    if (assignNewStatuses(newTaxing, isComesteroSupplyEnabled, isNayaxSupplyEnabled))
     {
       responseCode = 200;
       responseJsonObj["taxing"] = isTaxingEnabled;
@@ -435,28 +469,18 @@ bool isChecksumValid(String time, String checksum)
     return false;
 }
 
-bool assignNewTaxing(unsigned short newTaxing)
+bool assignNewStatuses(bool newTaxing, bool newComesteroSupply, bool newNayaxSupply)
 {
-  if (newTaxing == 1)
-    if (isTaxingEnabled)
-      return true;
-    else
-    {
-      isTaxingEnabled = true;
-      saveTaxingStatus();
-      return true;
-    }
-  else if (newTaxing == 0)
-    if (isTaxingEnabled)
-    {
-      isTaxingEnabled = false;
-      saveTaxingStatus();
-      return true;
-    }
-    else
-      return true;
-  else
-    return false;
+  if (newTaxing != isTaxingEnabled ||
+      newComesteroSupply != isComesteroSupplyEnabled ||
+      newNayaxSupply != isNayaxSupplyEnabled)
+  {
+    isTaxingEnabled = newTaxing;
+    setIsComesteroWorkingStatus(newComesteroSupply);
+    setIsNayaxWorkingStatus(newNayaxSupply);
+    saveDeviceStatus();
+    return true;
+  }
 }
 
 bool startMoneyProcessingSystem()
@@ -477,9 +501,6 @@ bool startMoneyProcessingSystem()
   // Sending data to outputs
   xTaskCreate(sendOutputDataTask, "Task5", 10000, NULL, 1, &Task5);
   delay(500);
-  // Start the 24V supply to Comestero and Nayax devices
-  digitalWrite(outputPinOfNayaxSupply, LOW);
-  digitalWrite(outputPinOfComesteroSupply, LOW);
   return true;
 }
 
@@ -538,25 +559,29 @@ void logTransaction(TransactionData transaction)
   Serial.println(transaction.inputPin);
 }
 
-bool loadTaxingStatus()
+bool loadDeviceStatus()
 {
-  File taxingFile = LittleFS.open("/config/lastTaxingStatus.json", "r");
-  if (!taxingFile)
+  File statusFile = LittleFS.open("/config/deviceStatus.json", "r");
+  if (!statusFile)
     return false;
   JsonDocument doc;
-  deserializeJson(doc, taxingFile);
+  deserializeJson(doc, statusFile);
   isTaxingEnabled = doc["taxing"];
-  taxingFile.close();
+  setIsComesteroWorkingStatus(doc["comesteroSupply"]);
+  setIsNayaxWorkingStatus(doc["nayaxSupply"]);
+  statusFile.close();
   return true;
 }
 
-void saveTaxingStatus()
+void saveDeviceStatus()
 {
-  File taxingFile = LittleFS.open("/config/lastTaxingStatus.json", "w");
+  File statusFile = LittleFS.open("/config/deviceStatus.json", "w");
   JsonDocument doc;
   doc["taxing"] = isTaxingEnabled;
-  serializeJson(doc, taxingFile);
-  taxingFile.close();
+  doc["comesteroSupply"] = isComesteroSupplyEnabled;
+  doc["nayaxSupply"] = isNayaxSupplyEnabled;
+  serializeJson(doc, statusFile);
+  statusFile.close();
 }
 
 bool loadConfigFile()
@@ -597,8 +622,28 @@ String getSourceName(int inputPin)
   case inputPinOfWebTransaction:
     return "Aplikacja";
     break;
-  default:  
+  default:
     return "Nieznane źródło";
     break;
   }
+}
+
+void setIsComesteroWorkingStatus(bool status)
+{
+  isComesteroSupplyEnabled = status;
+  setSupplyStatus(status, outputPinOfComesteroSupply);
+}
+
+void setIsNayaxWorkingStatus(bool status)
+{
+  isNayaxSupplyEnabled = status;
+  setSupplyStatus(status, outputPinOfNayaxSupply);
+}
+
+void setSupplyStatus(bool status, unsigned short pin)
+{
+  if (status)
+    digitalWrite(pin, LOW);
+  else
+    digitalWrite(pin, HIGH);
 }
