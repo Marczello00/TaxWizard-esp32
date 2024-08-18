@@ -261,7 +261,7 @@ void logTransactionToWeb(void *pvParameters)
 {
   OutputTransactionData *transactionPtr = (OutputTransactionData *)pvParameters;
   OutputTransactionData transaction = *transactionPtr;
-  String serverName = "http://" + serverIP + "/api/Transactions";
+  String serverName = "http://" + serverIP + "/v1/Transactions";
   int httpResponseCode = 0;
   for (int i = 0; httpResponseCode != 201; i++)
   {
@@ -376,7 +376,7 @@ void handleStatusRequest(AsyncWebServerRequest *request)
 void handleProvisionRequest(AsyncWebServerRequest *request)
 {
   unsigned short responseCode = 500;
-  String serverName = "http://" + serverIP + "/api/stationStatus?stationNumber=" + String(stationNumber) + "&StationTypeName=" + String(stationType);
+  String serverName = "http://" + serverIP + "/v1/stationStatus?stationNumber=" + String(stationNumber) + "&StationTypeName=" + String(stationType);
   WiFiClient client;
   HTTPClient http;
   int httpResponseCode = 0;
