@@ -5,9 +5,12 @@
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer/src/AsyncJson.h>
 #include <base64.h>
+#include <HTTPClient.h>
 
 #define LED_PIN 65
 #define LED_COUNT 1
+#define FIRMWARE_VERSION "1.1.0"
+#define FIRMWARE_NAME "-dev"
 
 typedef struct
 {
@@ -17,9 +20,10 @@ typedef struct
 
 typedef struct
 {
+  unsigned short inputPin;
   unsigned short creditCount;
   unsigned short outputPin;
-  bool shouldBeTaxed;
+  bool willBeTaxed;
 } OutputTransactionData;
 
 TaskHandle_t Task1;
@@ -27,13 +31,14 @@ TaskHandle_t Task2;
 TaskHandle_t Task3;
 TaskHandle_t Task4;
 TaskHandle_t Task5;
+TaskHandle_t Task6;
 
 const unsigned short inputPinOfComesteroMoney = 5;
 const unsigned short inputPinOfComesteroToken = 4;
 const unsigned short inputPinOfNayaxCreditCard = 7;
 const unsigned short inputPinOfNayaxPrepaidCard = 6;
-const unsigned short inputPinOfCarWashMonitoring = 15;
 const unsigned short inputPinOfWebTransaction = 99;
+const unsigned short inputPinOfCarWashMonitoring = 15;
 const unsigned short outputPinOfCarWashReceiverCH1 = 10;
 const unsigned short outputPinOfCarWashReceiverCH2 = 11;
 const unsigned short outputPinOfCashRegister = 12;
@@ -47,8 +52,15 @@ String salt = "sól";
 
 unsigned long inputSignalWidth = 150;
 unsigned long outputSignalWidth = 150;
+unsigned short stationNumber = 0;
+String serverIP = "255.255.255.255";
+String stationType = "Myjnia|Odkurzacz|Akcesoria";
+
 char inputSignalWidthName[40] = "Szerokość sygnału wejściowego [ms]";
 char outputSignalWidthName[40] = "Szerokość sygnału wyjściowego [ms]";
+char stationNumberName[40] = "Numer stanowiska";
+char stationTypeName[40] = "Typ stanowiska";
+char serverIPName[40] = "Adres IP serwera zarządzającego";
 
 QueueHandle_t TransactionsQueue;
 
@@ -59,14 +71,16 @@ AsyncFsWebServer server(80, LittleFS, "myServer");
 
 void listenToInputTask(void *pvParameters);
 void sendOutputDataTask(void *pvParameters);
+void logTransactionToWeb(void *pvParameters);
 bool startFilesystem();
 void getFsInfo(fsInfo_t *fsInfo);
 void handleTaxingRequest(AsyncWebServerRequest *request);
 void handleStatusRequest(AsyncWebServerRequest *request);
+void handleProvisionRequest(AsyncWebServerRequest *request);
 void handleTaxingJsonRequest(AsyncWebServerRequest *request, JsonVariant &requestJson);
 void handleTransactionJsonRequest(AsyncWebServerRequest *request, JsonVariant &requestJson);
 bool isChecksumValid(String time, String checksum);
-bool assignNewTaxing(unsigned short newTaxing);
+bool assignNewStatuses(bool newTaxing, bool newComesteroSupply, bool newNayaxSupply);
 void initPins();
 bool startMoneyProcessingSystem();
 void sendTransactionToPin(OutputTransactionData outcomingTransaction);
@@ -75,9 +89,13 @@ unsigned short getOutputPin(unsigned short inputPin);
 bool getCarWashStatus();
 void logTransaction(OutputTransactionData transaction);
 void logTransaction(TransactionData transaction);
-bool loadTaxingStatus();
-void saveTaxingStatus();
+bool loadDeviceStatus();
+void saveDeviceStatus();
 bool loadConfigFile();
+String getSourceName(int inputPin);
+void setIsComesteroWorkingStatus(bool status);
+void setIsNayaxWorkingStatus(bool status);
+void setSupplyStatus(bool status, unsigned short pin);
 
 void setup()
 {
@@ -116,6 +134,10 @@ void setup()
   server.addOptionBox("Szerokości sygnałów");
   server.addOption(inputSignalWidthName, inputSignalWidth);
   server.addOption(outputSignalWidthName, outputSignalWidth);
+  server.addOptionBox("Konfiguracja stanowiska");
+  server.addOption(stationNumberName, stationNumber);
+  server.addOption(stationTypeName, stationType);
+  server.addOption(serverIPName, serverIP);
   server.setSetupPageTitle("TaxWizard - Majcher");
   // Enable ACE FS file web editor and add FS info callback fucntion
   server.enableFsCodeEditor();
@@ -123,6 +145,7 @@ void setup()
   // Listening to routes
   server.on("/taxing", HTTP_GET, handleTaxingRequest);
   server.on("/myStatus", HTTP_GET, handleStatusRequest);
+  server.on("/provision", HTTP_GET, handleProvisionRequest);
   AsyncCallbackJsonWebHandler *taxingPostHandler = new AsyncCallbackJsonWebHandler("/taxing", handleTaxingJsonRequest);
   server.addHandler(taxingPostHandler);
   AsyncCallbackJsonWebHandler *transactionPostHandler = new AsyncCallbackJsonWebHandler("/transaction", handleTransactionJsonRequest);
@@ -136,9 +159,9 @@ void setup()
       "Open /setup page to configure optional parameters.\n"
       "Open /edit page to view, edit or upload example or your custom webserver source files."));
 
-  if (!loadTaxingStatus())
-    assignNewTaxing(1);
   startMoneyProcessingSystem();
+  if (!loadDeviceStatus())
+    assignNewStatuses(true, true, true);
 }
 
 void loop()
@@ -218,11 +241,13 @@ void sendOutputDataTask(void *pvParameters)
     if (xQueueReceive(TransactionsQueue, &transaction, (TickType_t)10) == pdPASS)
     {
       OutputTransactionData outputTransaction;
+      outputTransaction.inputPin = transaction.inputPin;
       outputTransaction.creditCount = transaction.creditCount;
       outputTransaction.outputPin = getOutputPin(transaction.inputPin);
-      outputTransaction.shouldBeTaxed = shouldThisPinBeTaxed(transaction.inputPin);
+      outputTransaction.willBeTaxed = shouldThisPinBeTaxed(transaction.inputPin);
       sendTransactionToPin(outputTransaction);
       logTransaction(outputTransaction);
+      xTaskCreate(logTransactionToWeb, "Task6", 10000, (void *)&outputTransaction, 1, &Task6);
       delay(200);
     }
     else
@@ -230,6 +255,47 @@ void sendOutputDataTask(void *pvParameters)
       delay(1000);
     }
   }
+}
+
+void logTransactionToWeb(void *pvParameters)
+{
+  OutputTransactionData *transactionPtr = (OutputTransactionData *)pvParameters;
+  OutputTransactionData transaction = *transactionPtr;
+  String serverName = "http://" + serverIP + "/v1/Transactions";
+  int httpResponseCode = 0;
+  for (int i = 0; httpResponseCode != 201; i++)
+  {
+    if (WiFi.status() == WL_CONNECTED)
+    {
+      WiFiClient client;
+      HTTPClient http;
+      http.begin(client, serverName);
+      http.addHeader("Content-Type", "application/json");
+      JsonDocument PostDoc;
+      JsonObject PostJsonObj = PostDoc.to<JsonObject>();
+      String PostBody = "";
+      PostJsonObj["wasFiscalized"] = transaction.willBeTaxed;
+      PostJsonObj["value"] = transaction.creditCount;
+      PostJsonObj["stationNumber"] = stationNumber;
+      PostJsonObj["stationTypeName"] = stationType;
+      PostJsonObj["transactionSourceName"] = getSourceName(transaction.inputPin);
+      serializeJson(PostDoc, PostBody);
+      httpResponseCode = http.POST(PostBody);
+      if (httpResponseCode != 201)
+      {
+        Serial.println("Error on sending POST request" + String(i) + "/10");
+      }
+    }
+
+    if (i >= 10)
+    {
+      Serial.println("POST request failed. ErrCode:" + String(httpResponseCode));
+      break;
+    }
+
+    delay(10000);
+  }
+  vTaskDelete(NULL);
 }
 
 void initPins()
@@ -307,6 +373,40 @@ void handleStatusRequest(AsyncWebServerRequest *request)
   request->send(responseCode, "application/json", responseBody);
 }
 
+void handleProvisionRequest(AsyncWebServerRequest *request)
+{
+  unsigned short responseCode = 500;
+  String serverName = "http://" + serverIP + "/v1/stationStatus?stationNumber=" + String(stationNumber) + "&StationTypeName=" + String(stationType);
+  WiFiClient client;
+  HTTPClient http;
+  int httpResponseCode = 0;
+
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    http.begin(client, serverName);
+    httpResponseCode = http.GET();
+    String payload = "{}";
+    if (httpResponseCode > 0)
+    {
+      payload = http.getString();
+    }
+    else
+      http.end();
+    JsonDocument responseDoc;
+    DeserializationError deSerErr = deserializeJson(responseDoc, payload);
+    if (deSerErr == DeserializationError::Ok)
+    {
+      JsonObject responseJsonObj = responseDoc.as<JsonObject>();
+      assignNewStatuses(responseJsonObj["isFiscOn"], responseJsonObj["areCashPaymentsAllowed"], responseJsonObj["areCardPaymentsAllowed"]);
+      responseCode = 200;
+    }
+    else
+      responseCode = 400;
+  }
+
+  request->send(responseCode, "application/json", "Mother-server responded:" + String(httpResponseCode));
+}
+
 void handleTaxingJsonRequest(AsyncWebServerRequest *request, JsonVariant &requestJson)
 {
   JsonObject requestJsonObj = requestJson.as<JsonObject>();
@@ -318,7 +418,7 @@ void handleTaxingJsonRequest(AsyncWebServerRequest *request, JsonVariant &reques
   JsonObject responseJsonObj = responseDoc.to<JsonObject>();
   String responseBody = "";
   if (isChecksumValid(time, checksum))
-    if (assignNewTaxing(newTaxing))
+    if (assignNewStatuses(newTaxing, isComesteroSupplyEnabled, isNayaxSupplyEnabled))
     {
       responseCode = 200;
       responseJsonObj["taxing"] = isTaxingEnabled;
@@ -369,28 +469,18 @@ bool isChecksumValid(String time, String checksum)
     return false;
 }
 
-bool assignNewTaxing(unsigned short newTaxing)
+bool assignNewStatuses(bool newTaxing, bool newComesteroSupply, bool newNayaxSupply)
 {
-  if (newTaxing == 1)
-    if (isTaxingEnabled)
-      return true;
-    else
-    {
-      isTaxingEnabled = true;
-      saveTaxingStatus();
-      return true;
-    }
-  else if (newTaxing == 0)
-    if (isTaxingEnabled)
-    {
-      isTaxingEnabled = false;
-      saveTaxingStatus();
-      return true;
-    }
-    else
-      return true;
-  else
-    return false;
+  if (newTaxing != isTaxingEnabled ||
+      newComesteroSupply != isComesteroSupplyEnabled ||
+      newNayaxSupply != isNayaxSupplyEnabled)
+  {
+    isTaxingEnabled = newTaxing;
+    setIsComesteroWorkingStatus(newComesteroSupply);
+    setIsNayaxWorkingStatus(newNayaxSupply);
+    saveDeviceStatus();
+    return true;
+  }
 }
 
 bool startMoneyProcessingSystem()
@@ -411,9 +501,6 @@ bool startMoneyProcessingSystem()
   // Sending data to outputs
   xTaskCreate(sendOutputDataTask, "Task5", 10000, NULL, 1, &Task5);
   delay(500);
-  // Start the 24V supply to Comestero and Nayax devices
-  digitalWrite(outputPinOfNayaxSupply, LOW);
-  digitalWrite(outputPinOfComesteroSupply, LOW);
   return true;
 }
 
@@ -422,12 +509,12 @@ void sendTransactionToPin(OutputTransactionData outcomingTransaction)
   for (int i = 0; i < outcomingTransaction.creditCount; i++)
   {
     digitalWrite(outcomingTransaction.outputPin, HIGH);
-    if (outcomingTransaction.shouldBeTaxed)
+    if (outcomingTransaction.willBeTaxed)
       digitalWrite(outputPinOfCashRegister, HIGH);
     delay(outputSignalWidth);
 
     digitalWrite(outcomingTransaction.outputPin, LOW);
-    if (outcomingTransaction.shouldBeTaxed)
+    if (outcomingTransaction.willBeTaxed)
       digitalWrite(outputPinOfCashRegister, LOW);
     delay(outputSignalWidth);
   }
@@ -461,7 +548,7 @@ void logTransaction(OutputTransactionData transaction)
   Serial.print(transaction.creditCount);
   Serial.print(" do pinu: ");
   Serial.print(transaction.outputPin);
-  transaction.shouldBeTaxed ? Serial.println(" zafiskalizowana") : Serial.println(" niezafiskalizowana");
+  transaction.willBeTaxed ? Serial.println(" zafiskalizowana") : Serial.println(" niezafiskalizowana");
 }
 
 void logTransaction(TransactionData transaction)
@@ -472,25 +559,29 @@ void logTransaction(TransactionData transaction)
   Serial.println(transaction.inputPin);
 }
 
-bool loadTaxingStatus()
+bool loadDeviceStatus()
 {
-  File taxingFile = LittleFS.open("/config/lastTaxingStatus.json", "r");
-  if (!taxingFile)
+  File statusFile = LittleFS.open("/config/deviceStatus.json", "r");
+  if (!statusFile)
     return false;
   JsonDocument doc;
-  deserializeJson(doc, taxingFile);
+  deserializeJson(doc, statusFile);
   isTaxingEnabled = doc["taxing"];
-  taxingFile.close();
+  setIsComesteroWorkingStatus(doc["comesteroSupply"]);
+  setIsNayaxWorkingStatus(doc["nayaxSupply"]);
+  statusFile.close();
   return true;
 }
 
-void saveTaxingStatus()
+void saveDeviceStatus()
 {
-  File taxingFile = LittleFS.open("/config/lastTaxingStatus.json", "w");
+  File statusFile = LittleFS.open("/config/deviceStatus.json", "w");
   JsonDocument doc;
   doc["taxing"] = isTaxingEnabled;
-  serializeJson(doc, taxingFile);
-  taxingFile.close();
+  doc["comesteroSupply"] = isComesteroSupplyEnabled;
+  doc["nayaxSupply"] = isNayaxSupplyEnabled;
+  serializeJson(doc, statusFile);
+  statusFile.close();
 }
 
 bool loadConfigFile()
@@ -502,9 +593,57 @@ bool loadConfigFile()
     deserializeJson(configJson, config);
     inputSignalWidth = configJson[inputSignalWidthName] | 150;
     outputSignalWidth = configJson[outputSignalWidthName] | 150;
+    stationNumber = configJson[stationNumberName] | 0;
+    stationType = configJson[stationTypeName] | "Brak";
+    serverIP = configJson[serverIPName] | "192.168.1.30";
     config.close();
     return true;
   }
   else
     return false;
+}
+
+String getSourceName(int inputPin)
+{
+  switch (inputPin)
+  {
+  case inputPinOfComesteroMoney:
+    return "Gotówka";
+    break;
+  case inputPinOfComesteroToken:
+    return "Żeton";
+    break;
+  case inputPinOfNayaxCreditCard:
+    return "Karta";
+    break;
+  case inputPinOfNayaxPrepaidCard:
+    return "Prepaid";
+    break;
+  case inputPinOfWebTransaction:
+    return "Aplikacja";
+    break;
+  default:
+    return "Nieznane źródło";
+    break;
+  }
+}
+
+void setIsComesteroWorkingStatus(bool status)
+{
+  isComesteroSupplyEnabled = status;
+  setSupplyStatus(status, outputPinOfComesteroSupply);
+}
+
+void setIsNayaxWorkingStatus(bool status)
+{
+  isNayaxSupplyEnabled = status;
+  setSupplyStatus(status, outputPinOfNayaxSupply);
+}
+
+void setSupplyStatus(bool status, unsigned short pin)
+{
+  if (status)
+    digitalWrite(pin, LOW);
+  else
+    digitalWrite(pin, HIGH);
 }
