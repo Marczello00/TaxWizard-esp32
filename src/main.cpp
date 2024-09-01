@@ -130,7 +130,7 @@ void setup()
   }
 
   // Config server
-  server.setFirmwareVersion("1.0.0-main");
+  server.setFirmwareVersion("1.1.0-main");
   server.addOptionBox("Szerokości sygnałów");
   server.addOption(inputSignalWidthName, inputSignalWidth);
   server.addOption(outputSignalWidthName, outputSignalWidth);
