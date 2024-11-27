@@ -9,8 +9,7 @@
 
 #define LED_PIN 65
 #define LED_COUNT 1
-#define FIRMWARE_VERSION "1.1.0"
-#define FIRMWARE_NAME "-dev"
+#define FIRMWARE_VERSION "1.2.0"
 
 typedef struct
 {
@@ -130,7 +129,7 @@ void setup()
   }
 
   // Config server
-  server.setFirmwareVersion("1.1.0-main");
+  server.setFirmwareVersion(FIRMWARE_VERSION);
   server.addOptionBox("Szerokości sygnałów");
   server.addOption(inputSignalWidthName, inputSignalWidth);
   server.addOption(outputSignalWidthName, outputSignalWidth);
@@ -433,9 +432,18 @@ void handleTaxingJsonRequest(AsyncWebServerRequest *request, JsonVariant &reques
 
 void handleTransactionJsonRequest(AsyncWebServerRequest *request, JsonVariant &requestJson)
 {
+  //Check if request is from management server
+  IPAddress clientIP = request->client()->remoteIP();
+  if (clientIP.toString() != serverIP) {
+    request->send(403, "application/json", "{\"error\":\"Forbidden\"}");
+    return;
+  }
+
+  //Try to get credit amount from request
   JsonObject requestJsonObj = requestJson.as<JsonObject>();
   unsigned short creditCount = requestJsonObj["creditCount"] | 0;
-  unsigned short responseCode = 500;
+  unsigned short responseCode = 500; //Internal server error
+
   if (creditCount > 0 && creditCount <= 20)
   {
     TransactionData transaction;
@@ -444,19 +452,15 @@ void handleTransactionJsonRequest(AsyncWebServerRequest *request, JsonVariant &r
     if (xQueueSendToBack(TransactionsQueue, &transaction, (TickType_t)10) == pdPASS)
     {
       logTransaction(transaction);
-      responseCode = 200;
+      responseCode = 200; //OK
     }
     else
-      responseCode = 507;
+      responseCode = 507; //Insufficient storage
   }
   else
-    responseCode = 400;
-  JsonDocument responseDoc;
-  JsonObject responseJsonObj = responseDoc.to<JsonObject>();
-  String responseBody = "";
+    responseCode = 400; //Bad request
 
-  serializeJson(responseDoc, responseBody);
-  request->send(responseCode, "application/json", responseBody);
+  request->send(responseCode, "application/json", "{}");
 }
 
 bool isChecksumValid(String time, String checksum)
@@ -481,6 +485,7 @@ bool assignNewStatuses(bool newTaxing, bool newComesteroSupply, bool newNayaxSup
     saveDeviceStatus();
     return true;
   }
+  return false;
 }
 
 bool startMoneyProcessingSystem()
